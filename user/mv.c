@@ -7,7 +7,7 @@ int main (int argc, char* argv[])
 {
 
   if (argc != 3) {
-    printf("Error: Please use the format mv [CUR NAME] [NEW NAME]");
+    printf("Error: Please use the format mv [CUR NAME] [NEW NAME]\n");
     return -1;
   }
 
@@ -17,12 +17,12 @@ int main (int argc, char* argv[])
   int new_hardlink_status = link(old_file_name, new_file_name);
 
   if (new_hardlink_status == -1) {
-    printf("Error: Unable to create new hardlink");
+    printf("Error: Unable to create new hardlink\n");
     return -1;
   }
 
   if (unlink(old_file_name) == -1) {
-    printf("Error: Unable to unlink old filename"); 
+    printf("Error: Unable to unlink old filename\n"); 
     return -1;
   }
 
