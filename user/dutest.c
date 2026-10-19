@@ -4,15 +4,10 @@
 #include "user/user.h"
 
 #define ROOT "dutest_tmp"
-#define D1 ROOT "/dir1"
-#define D2 D1 "/dir2"
-#define D3 D2 "/dir3"
-#define EMPTY ROOT "/empty"
-
-#define F0 ROOT "/file"
-#define F1 D1 "/file1"
-#define F2 D2 "/file2"
-#define F3 D3 "/file3"
+#define SUB ROOT "/sub"
+#define DEEP SUB "/deep"
+#define FILE ROOT "/a.txt"
+#define LONGFILE DEEP "/abcdefghijklmn"
 
 struct expected {
   char *path;
@@ -22,44 +17,35 @@ struct expected {
 static int failures;
 
 static void
-fatal(char *message)
-{
-  fprintf(2, "dutest: %s\n", message);
-  exit(1);
-}
-
-static void
 cleanup(void)
 {
-  unlink(F3);
-  unlink(F2);
-  unlink(F1);
-  unlink(F0);
-  unlink(D3);
-  unlink(D2);
-  unlink(D1);
-  unlink(EMPTY);
+  unlink(LONGFILE);
+  unlink(FILE);
+  unlink(DEEP);
+  unlink(SUB);
   unlink(ROOT);
 }
 
 static void
-make_file(char *path, int size)
+fatal(char *message)
 {
-  char buf[128];
-  int fd;
-  int n;
+  fprintf(2, "dutest: %s\n", message);
+  cleanup();
+  exit(1);
+}
 
-  memset(buf, 'x', sizeof(buf));
+static void
+make_file(char *path, char *contents)
+{
+  int fd = open(path, O_CREATE | O_WRONLY);
+  int length = strlen(contents);
 
-  fd = open(path, O_CREATE | O_WRONLY);
   if (fd < 0)
     fatal("cannot create test file");
 
-  while (size > 0) {
-    n = size < sizeof(buf) ? size : sizeof(buf);
-    if (write(fd, buf, n) != n)
-      fatal("cannot write test file");
-    size -= n;
+  if (write(fd, contents, length) != length) {
+    close(fd);
+    fatal("cannot write test file");
   }
 
   close(fd);
@@ -69,208 +55,203 @@ static int
 file_size(char *path)
 {
   struct stat st;
-  int fd;
+  int fd = open(path, O_RDONLY);
 
-  fd = open(path, O_RDONLY);
   if (fd < 0)
-    fatal("cannot open path for fstat");
+    fatal("cannot open fixture");
 
-  if (fstat(fd, &st) < 0)
+  if (fstat(fd, &st) < 0) {
+    close(fd);
     fatal("fstat failed");
+  }
 
   close(fd);
   return st.size;
 }
 
 /*
- * Read one output line:
- *
- *   decimal-size<TAB>path<NEWLINE>
- *
- * Advance *cursor past the line on success.
+ * Capture stdout while du runs. Reading before wait prevents a full
+ * pipe from blocking the child indefinitely.
  */
 static int
-check_line(char **cursor, struct expected *want)
+capture_du(char *path, char *output, int capacity)
 {
-  char *p = *cursor;
-  char *name = want->path;
-  int size = 0;
-
-  if (*p < '0' || *p > '9')
-    return 0;
-
-  while (*p >= '0' && *p <= '9') {
-    size = size * 10 + (*p - '0');
-    p++;
-  }
-
-  if (size != want->size || *p != '\t')
-    return 0;
-  p++;
-
-  while (*name) {
-    if (*p != *name)
-      return 0;
-    p++;
-    name++;
-  }
-
-  if (*p != '\n')
-    return 0;
-
-  *cursor = p + 1;
-  return 1;
-}
-
-static void
-run_test(char *label, char *path, struct expected *want, int count)
-{
-  static char output[4096];
-  static char discard[128];
-  char *cursor;
-  int fds[2];
+  int p[2];
   int pid;
   int status;
   int used = 0;
   int overflow = 0;
   int n;
-  int ok;
+  char chunk[128];
 
-  if (pipe(fds) < 0)
+  if (pipe(p) < 0)
     fatal("pipe failed");
 
   pid = fork();
-  if (pid < 0)
+  if (pid < 0) {
+    close(p[0]);
+    close(p[1]);
     fatal("fork failed");
+  }
 
   if (pid == 0) {
     char *args[] = {"du", path, 0};
 
-    close(fds[0]);
+    close(p[0]);
     close(1);
 
-    if (dup(fds[1]) != 1)
+    if (dup(p[1]) != 1)
       exit(1);
 
-    close(fds[1]);
+    close(p[1]);
     exec("du", args);
-
     fprintf(2, "dutest: cannot exec du\n");
     exit(1);
   }
 
-  close(fds[1]);
+  close(p[1]);
 
-  while (used < sizeof(output) - 1) {
-    n = read(fds[0], output + used, sizeof(output) - 1 - used);
-    if (n < 0)
-      fatal("read failed");
-    if (n == 0)
-      break;
-    used += n;
+  while ((n = read(p[0], chunk, sizeof(chunk))) > 0) {
+    for (int i = 0; i < n; i++) {
+      if (used < capacity - 1)
+        output[used++] = chunk[i];
+      else
+        overflow = 1;
+    }
   }
 
-  /*
-   * Drain excess output before waiting so a verbose child cannot
-   * block forever on a full pipe.
-   */
-  while ((n = read(fds[0], discard, sizeof(discard))) > 0)
-    overflow = 1;
-
-  if (n < 0)
-    fatal("read failed");
-
+  close(p[0]);
   output[used] = '\0';
-  close(fds[0]);
 
   if (wait(&status) < 0)
-    fatal("wait failed");
+    return -1;
 
-  cursor = output;
-  ok = status == 0 && !overflow;
+  if (n < 0 || overflow || status != 0)
+    return -1;
 
-  for (int i = 0; i < count && ok; i++)
-    ok = check_line(&cursor, &want[i]);
+  return 0;
+}
 
-  if (ok && cursor != output + used)
-    ok = 0;
+/* Match exactly: decimal size, tab, path, newline. */
+static int
+matches(char *output, struct expected *expected, int count)
+{
+  char *p = output;
 
-  if (ok) {
-    printf("PASS: %s\n", label);
+  for (int i = 0; i < count; i++) {
+    int size = 0;
+    char *name = expected[i].path;
+
+    if (*p < '0' || *p > '9')
+      return 0;
+
+    while (*p >= '0' && *p <= '9') {
+      size = size * 10 + (*p - '0');
+      p++;
+    }
+
+    if (size != expected[i].size || *p != '\t')
+      return 0;
+
+    p++;
+
+    while (*name) {
+      if (*p != *name)
+        return 0;
+      p++;
+      name++;
+    }
+
+    if (*p != '\n')
+      return 0;
+
+    p++;
+  }
+
+  return *p == '\0';
+}
+
+static void
+check(char *label, char *path, struct expected *expected, int count)
+{
+  char output[2048];
+
+  if (capture_du(path, output, sizeof(output)) < 0) {
+    printf("FAIL: %s (du failed or output too large)\n", label);
+    failures++;
     return;
   }
 
-  failures++;
-  printf("FAIL: %s\n", label);
-  printf("  Exit status: %d\n", status);
-  printf("  Expected output (size TAB path):\n");
+  if (!matches(output, expected, count)) {
+    printf("FAIL: %s\n", label);
+    printf("Expected:\n");
 
-  for (int i = 0; i < count; i++)
-    printf("%d\t%s\n", want[i].size, want[i].path);
+    for (int i = 0; i < count; i++)
+      printf("%d\t%s\n", expected[i].size, expected[i].path);
 
-  printf("  Actual output:\n%s", output);
-
-  if (used == 0 || output[used - 1] != '\n')
+    printf("Actual:\n%s", output);
     printf("\n");
+    failures++;
+    return;
+  }
 
-  if (overflow)
-    printf("  [Output exceeded capture buffer]\n");
+  printf("PASS: %s\n", label);
 }
 
 int
 main(void)
 {
-  int s1;
-  int s2;
-  int s3;
-  struct expected regular[1];
-  struct expected empty[1];
-  struct expected deepest[1];
-  struct expected nested[3];
+  struct stat st;
+  struct expected expected[3];
+  int deep_total;
+  int sub_total;
+  int root_total;
 
   /*
-   * ROOT is reserved for this test. Remove leftovers from an
-   * earlier run before creating the fixture.
+   * Do not delete an existing directory that might contain user data.
    */
-  cleanup();
+  if (stat(ROOT, &st) == 0) {
+    fprintf(2, "dutest: %s already exists; remove it first\n", ROOT);
+    exit(1);
+  }
 
-  if (mkdir(ROOT) < 0 || mkdir(D1) < 0 || mkdir(D2) < 0 ||
-      mkdir(D3) < 0 || mkdir(EMPTY) < 0)
-    fatal("cannot create test directories");
+  if (mkdir(ROOT) < 0)
+    fatal("cannot create root directory");
 
-  make_file(F0, 37);
-  make_file(F1, 101);
-  make_file(F2, 1025);
-  make_file(F3, 4097);
+  expected[0].path = ROOT;
+  expected[0].size = file_size(ROOT);
+  check("empty directory", ROOT, expected, 1);
+
+  if (mkdir(SUB) < 0 || mkdir(DEEP) < 0)
+    fatal("cannot create nested directories");
+
+  make_file(FILE, "1234\n");
+  make_file(LONGFILE, "abcdefgh\n");
+
+  expected[0].path = FILE;
+  expected[0].size = file_size(FILE);
+  check("regular file", FILE, expected, 1);
+
+  expected[0].path = LONGFILE;
+  expected[0].size = file_size(LONGFILE);
+  check("14-character filename", LONGFILE, expected, 1);
 
   /*
-   * Query directory sizes after creating every entry. Directory
-   * sizes are filesystem-dependent and must not be hardcoded.
+   * Measure directory sizes after creating all directory entries.
+   * Each subtree includes its own directory file.
    */
-  s3 = file_size(D3) + 4097;
-  s2 = file_size(D2) + 1025 + s3;
-  s1 = file_size(D1) + 101 + s2;
+  deep_total = file_size(DEEP) + file_size(LONGFILE);
+  sub_total = file_size(SUB) + deep_total;
+  root_total = file_size(ROOT) + file_size(FILE) + sub_total;
 
-  regular[0].path = F0;
-  regular[0].size = 37;
+  expected[0].path = DEEP;
+  expected[0].size = deep_total;
+  expected[1].path = SUB;
+  expected[1].size = sub_total;
+  expected[2].path = ROOT;
+  expected[2].size = root_total;
 
-  empty[0].path = EMPTY;
-  empty[0].size = file_size(EMPTY);
-
-  deepest[0].path = D3;
-  deepest[0].size = s3;
-
-  nested[0].path = D3;
-  nested[0].size = s3;
-  nested[1].path = D2;
-  nested[1].size = s2;
-  nested[2].path = D1;
-  nested[2].size = s1;
-
-  run_test("regular file", F0, regular, 1);
-  run_test("empty directory", EMPTY, empty, 1);
-  run_test("directory containing a file", D3, deepest, 1);
-  run_test("three nested directories", D1, nested, 3);
+  check("recursive totals and postorder output", ROOT, expected, 3);
 
   cleanup();
 
@@ -279,6 +260,6 @@ main(void)
     exit(1);
   }
 
-  printf("dutest: all 4 tests passed\n");
+  printf("dutest: all tests passed\n");
   exit(0);
 }
