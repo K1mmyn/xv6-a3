@@ -4,43 +4,34 @@
 #include "user/user.h"
 #include "kernel/fs.h"
 
-void format_path(char *buf, const char *path, const char *name) {
-    char *p;
-    
-    // Copy the base path
-    strcpy(buf, path);
-    p = buf + strlen(buf);
-    
-    // Add trailing slash if missing (unless path is just root "/")
-    if (p > buf && *(p - 1) != '/') {
-        *p++ = '/';
-    }
-    
-    // Append the file or directory name
-    strcpy(p, name);
-}
+char path[512];
 
-int collect_total_size(char* filename){
-    int fd = open(filename, O_RDONLY);
+int collect_total_size(int first){
+    int fd = open(path, O_RDONLY);
 
-    if (fd == -1) {
+    if (fd < 0) {
       printf("Error: Unable to open file");
       return -1;
     }
 
     struct stat file_meta;
 
-    if (fstat(fd, &file_meta) == -1) {
+    if (fstat(fd, &file_meta) < 0) {
        printf("Error: Unable to excute fstat") ;
        close(fd);
        return -1;
     }
 
-    int total_size = 0;
+    long int total_size = file_meta.size;
+    int start = strlen(path);
+    char name[DIRSIZ + 1];
 
-    if (file_meta.type == T_FILE) {
+    if (file_meta.type != T_DIR) {
+        if (first) {
+          printf("%ld\t%s\n", total_size, path);
+        }
         close(fd);
-        return file_meta.size;
+        return total_size;
     } else {
         struct dirent de;
         while(read(fd, &de, sizeof(de)) == sizeof(de)) {
@@ -48,19 +39,44 @@ int collect_total_size(char* filename){
                 continue;
             }
 
-            if (strcmp(de.name, ".") == 0 || strcmp(de.name, "..") == 0)
+            memmove(name, de.name, DIRSIZ);
+            name[DIRSIZ] = '\0';
+
+            if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
                 continue;
 
-            //TODO IDK HOW TO FIND NEW FILE PAth
-            //
-            char buf[512];
+            int pos = start;
 
-            format_path(buf, filename, de.name);
+            if (pos > 0 && path[pos - 1] != '/') {
+                pos++;
+            }
+            
+            if (pos + strlen(name) + 1 > sizeof(path)) {
+              printf("Error: file path too long");
+              close(fd);
+              return -1; 
+            }
 
-            total_size += collect_total_size(buf);
+            if (pos != start) {
+                path[start] = '/';
+            }
+
+            strcpy(path + pos, name); 
+            long int child_size = collect_total_size(0);
+
+            path[start] = '\0';
+            if (child_size < 0) {
+                close(fd);
+                return -1;
+            }
+
+            total_size += child_size;
+
         } 
-        printf("%d\t%s\n", total_size, filename);
+        
     }
+
+    printf("%ld\t%s\n", total_size, path);
 
     close(fd);
     return total_size;
@@ -72,26 +88,14 @@ int main(int argc, char* argv[])
       printf("Error: Please use the format du [PATH]");
       return -1;
     }
-    int fd = open(argv[1], O_RDONLY);
-
-    if (fd == -1) {
-      printf("Error: Unable to open file");
+    if (strlen(argv[1]) >= sizeof(path)) {
+      printf("Error: file name is too long\n");
+      return -1;
+    }
+    strcpy(path, argv[1]);
+    if (collect_total_size(1) < 0) {
       return -1;
     }
 
-    struct stat file_meta;
-
-    if (fstat(fd, &file_meta) == -1) {
-       printf("Error: Unable to excute fstat") ;
-       close(fd);
-       return -1;
-    }
-
-    if (file_meta.type == T_FILE) {
-        printf("%ld\t%s\n", file_meta.size, argv[1]);
-        return 0;
-    }
-    close(fd);
-    collect_total_size(argv[1]);
     return 0;
 }

@@ -125,8 +125,8 @@ check_line(char **cursor, struct expected *want)
 static void
 run_test(char *label, char *path, struct expected *want, int count)
 {
-  char output[4096];
-  char discard[128];
+  static char output[4096];
+  static char discard[128];
   char *cursor;
   int fds[2];
   int pid;
