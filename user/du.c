@@ -22,7 +22,7 @@ int collect_total_size(int first){
        return -1;
     }
 
-    long int total_size = file_meta.size;
+    int total_size = file_meta.size;
     int start = strlen(path);
     char name[DIRSIZ + 1];
 

@@ -3,100 +3,92 @@
 #include "kernel/fcntl.h"
 #include "user/user.h"
 
-#define ROOT "dutest_tmp"
-#define SUB ROOT "/sub"
-#define DEEP SUB "/deep"
-#define FILE ROOT "/a.txt"
-#define LONGFILE DEEP "/abcdefghijklmn"
-
-struct expected {
-  char *path;
-  int size;
-};
-
 static int failures;
-
-static void
-cleanup(void)
-{
-  unlink(LONGFILE);
-  unlink(FILE);
-  unlink(DEEP);
-  unlink(SUB);
-  unlink(ROOT);
-}
 
 static void
 fatal(char *message)
 {
   fprintf(2, "dutest: %s\n", message);
-  cleanup();
   exit(1);
 }
 
 static void
 make_file(char *path, char *contents)
 {
-  int fd = open(path, O_CREATE | O_WRONLY);
-  int length = strlen(contents);
+  int fd = open(path, O_CREATE | O_WRONLY | O_TRUNC);
+  int len = strlen(contents);
 
   if (fd < 0)
     fatal("cannot create test file");
 
-  if (write(fd, contents, length) != length) {
-    close(fd);
+  if (write(fd, contents, len) != len)
     fatal("cannot write test file");
-  }
 
   close(fd);
 }
 
-static int
+static uint64
 file_size(char *path)
 {
   struct stat st;
   int fd = open(path, O_RDONLY);
 
   if (fd < 0)
-    fatal("cannot open fixture");
+    fatal("cannot open test path");
 
-  if (fstat(fd, &st) < 0) {
-    close(fd);
+  if (fstat(fd, &st) < 0)
     fatal("fstat failed");
-  }
 
   close(fd);
   return st.size;
 }
 
-/*
- * Capture stdout while du runs. Reading before wait prevents a full
- * pipe from blocking the child indefinitely.
- */
-static int
-capture_du(char *path, char *output, int capacity)
+/* Append one expected output line without needing snprintf(). */
+static void
+append_line(char *output, uint64 size, char *path)
+{
+  char digits[32];
+  int count = 0;
+  int pos = strlen(output);
+
+  do {
+    digits[count++] = '0' + size % 10;
+    size /= 10;
+  } while (size != 0);
+
+  while (count > 0)
+    output[pos++] = digits[--count];
+
+  output[pos++] = '\t';
+
+  while (*path)
+    output[pos++] = *path++;
+
+  output[pos++] = '\n';
+  output[pos] = '\0';
+}
+
+static void
+check(char *label, char *path, char *expected)
 {
   int p[2];
-  int pid;
   int status;
   int used = 0;
   int overflow = 0;
   int n;
+  char actual[2048];
   char chunk[128];
+  char *args[] = {"du", path, 0};
 
   if (pipe(p) < 0)
     fatal("pipe failed");
 
-  pid = fork();
-  if (pid < 0) {
-    close(p[0]);
-    close(p[1]);
+  int pid = fork();
+
+  if (pid < 0)
     fatal("fork failed");
-  }
 
   if (pid == 0) {
-    char *args[] = {"du", path, 0};
-
     close(p[0]);
     close(1);
 
@@ -111,155 +103,136 @@ capture_du(char *path, char *output, int capacity)
 
   close(p[1]);
 
+  /* Keep draining even if the output exceeds our buffer. */
   while ((n = read(p[0], chunk, sizeof(chunk))) > 0) {
     for (int i = 0; i < n; i++) {
-      if (used < capacity - 1)
-        output[used++] = chunk[i];
+      if (used < sizeof(actual) - 1)
+        actual[used++] = chunk[i];
       else
         overflow = 1;
     }
   }
 
   close(p[0]);
-  output[used] = '\0';
+  actual[used] = '\0';
+  wait(&status);
 
-  if (wait(&status) < 0)
-    return -1;
-
-  if (n < 0 || overflow || status != 0)
-    return -1;
-
-  return 0;
-}
-
-/* Match exactly: decimal size, tab, path, newline. */
-static int
-matches(char *output, struct expected *expected, int count)
-{
-  char *p = output;
-
-  for (int i = 0; i < count; i++) {
-    int size = 0;
-    char *name = expected[i].path;
-
-    if (*p < '0' || *p > '9')
-      return 0;
-
-    while (*p >= '0' && *p <= '9') {
-      size = size * 10 + (*p - '0');
-      p++;
-    }
-
-    if (size != expected[i].size || *p != '\t')
-      return 0;
-
-    p++;
-
-    while (*name) {
-      if (*p != *name)
-        return 0;
-      p++;
-      name++;
-    }
-
-    if (*p != '\n')
-      return 0;
-
-    p++;
+  if (status == 0 && n == 0 && !overflow &&
+      strcmp(actual, expected) == 0) {
+    printf("PASS: %s\n", label);
+    return;
   }
 
-  return *p == '\0';
+  failures++;
+  printf("FAIL: %s\n", label);
+  printf("Expected:\n%s", expected);
+  printf("Actual:\n%s", actual);
+
+  if (used == 0 || actual[used - 1] != '\n')
+    printf("\n");
+
+  if (overflow)
+    printf("(output exceeded capture buffer)\n");
+
+  if (status != 0)
+    printf("(du exited with status %d)\n", status);
 }
 
 static void
-check(char *label, char *path, struct expected *expected, int count)
+cleanup(void)
 {
-  char output[2048];
-
-  if (capture_du(path, output, sizeof(output)) < 0) {
-    printf("FAIL: %s (du failed or output too large)\n", label);
-    failures++;
-    return;
-  }
-
-  if (!matches(output, expected, count)) {
-    printf("FAIL: %s\n", label);
-    printf("Expected:\n");
-
-    for (int i = 0; i < count; i++)
-      printf("%d\t%s\n", expected[i].size, expected[i].path);
-
-    printf("Actual:\n%s", output);
-    printf("\n");
-    failures++;
-    return;
-  }
-
-  printf("PASS: %s\n", label);
+  /* Remove children before their parent directories. */
+  unlink("dutmp/sub/deep/c.txt");
+  unlink("dutmp/sub/deep");
+  unlink("dutmp/sub/b.txt");
+  unlink("dutmp/sub");
+  unlink("dutmp/empty");
+  unlink("dutmp/abcdefghijklmn");
+  unlink("dutmp/a.txt");
+  unlink("dutmp");
 }
 
 int
 main(void)
 {
-  struct stat st;
-  struct expected expected[3];
-  int deep_total;
-  int sub_total;
-  int root_total;
+  char expected[1024];
+  uint64 deep_size;
+  uint64 sub_size;
+  uint64 empty_size;
+  uint64 root_size;
 
   /*
-   * Do not delete an existing directory that might contain user data.
+   * Reserve this directory for the tester. Refuse to overwrite an
+   * existing directory or file.
    */
-  if (stat(ROOT, &st) == 0) {
-    fprintf(2, "dutest: %s already exists; remove it first\n", ROOT);
-    exit(1);
-  }
+  if (mkdir("dutmp") < 0)
+    fatal("dutmp already exists or cannot be created; remove it first");
 
-  if (mkdir(ROOT) < 0)
-    fatal("cannot create root directory");
+  if (mkdir("dutmp/sub") < 0 ||
+      mkdir("dutmp/sub/deep") < 0 ||
+      mkdir("dutmp/empty") < 0)
+    fatal("cannot create test directories");
 
-  expected[0].path = ROOT;
-  expected[0].size = file_size(ROOT);
-  check("empty directory", ROOT, expected, 1);
+  make_file("dutmp/a.txt", "1234\n");
+  make_file("dutmp/sub/b.txt", "abcdef\n");
+  make_file("dutmp/sub/deep/c.txt", "xyz\n");
+  make_file("dutmp/abcdefghijklmn", "fourteen-name\n");
 
-  if (mkdir(SUB) < 0 || mkdir(DEEP) < 0)
-    fatal("cannot create nested directories");
+  /* Measure directory sizes only after creating all entries. */
+  deep_size = file_size("dutmp/sub/deep") +
+              file_size("dutmp/sub/deep/c.txt");
 
-  make_file(FILE, "1234\n");
-  make_file(LONGFILE, "abcdefgh\n");
+  sub_size = file_size("dutmp/sub") +
+             file_size("dutmp/sub/b.txt") + deep_size;
 
-  expected[0].path = FILE;
-  expected[0].size = file_size(FILE);
-  check("regular file", FILE, expected, 1);
+  empty_size = file_size("dutmp/empty");
 
-  expected[0].path = LONGFILE;
-  expected[0].size = file_size(LONGFILE);
-  check("14-character filename", LONGFILE, expected, 1);
+  root_size = file_size("dutmp") +
+              file_size("dutmp/a.txt") +
+              file_size("dutmp/abcdefghijklmn") +
+              sub_size + empty_size;
+
+  expected[0] = '\0';
+  append_line(expected, 5, "dutmp/a.txt");
+  check("regular file", "dutmp/a.txt", expected);
+
+  expected[0] = '\0';
+  append_line(expected, file_size("dutmp/abcdefghijklmn"),
+              "dutmp/abcdefghijklmn");
+  check("14-character filename", "dutmp/abcdefghijklmn", expected);
+
+  expected[0] = '\0';
+  append_line(expected, empty_size, "dutmp/empty");
+  check("empty directory", "dutmp/empty", expected);
+
+  expected[0] = '\0';
+  append_line(expected, deep_size, "dutmp/sub/deep");
+  append_line(expected, sub_size, "dutmp/sub");
+  check("nested directory", "dutmp/sub", expected);
 
   /*
-   * Measure directory sizes after creating all directory entries.
-   * Each subtree includes its own directory file.
+   * Test sibling directories independently of their traversal order.
+   * Either sibling ordering is permitted, but parents must come last.
    */
-  deep_total = file_size(DEEP) + file_size(LONGFILE);
-  sub_total = file_size(SUB) + deep_total;
-  root_total = file_size(ROOT) + file_size(FILE) + sub_total;
+  if (unlink("dutmp/empty") < 0)
+    fatal("cannot remove empty test directory");
 
-  expected[0].path = DEEP;
-  expected[0].size = deep_total;
-  expected[1].path = SUB;
-  expected[1].size = sub_total;
-  expected[2].path = ROOT;
-  expected[2].size = root_total;
+  root_size = file_size("dutmp") +
+              file_size("dutmp/a.txt") +
+              file_size("dutmp/abcdefghijklmn") + sub_size;
 
-  check("recursive totals and postorder output", ROOT, expected, 3);
+  expected[0] = '\0';
+  append_line(expected, deep_size, "dutmp/sub/deep");
+  append_line(expected, sub_size, "dutmp/sub");
+  append_line(expected, root_size, "dutmp");
+  check("full recursive total and output order", "dutmp", expected);
 
   cleanup();
 
-  if (failures) {
-    printf("dutest: %d test(s) failed\n", failures);
-    exit(1);
-  }
+  if (failures == 0)
+    printf("All 5 tests passed.\n");
+  else
+    printf("%d of 5 tests failed.\n", failures);
 
-  printf("dutest: all tests passed\n");
-  exit(0);
+  exit(failures != 0);
 }
