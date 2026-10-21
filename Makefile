@@ -149,6 +149,7 @@ UPROGS=\
   $U/_uoa_iobound\
 	$U/_uoa_exectime\
 	$U/_uoa_testschd\
+	$U/_timetest\
 	$U/_du\
 	$U/_dutest\
 
