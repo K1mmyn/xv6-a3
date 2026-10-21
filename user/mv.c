@@ -16,12 +16,12 @@ int main (int argc, char* argv[])
 
   int new_hardlink_status = link(old_file_name, new_file_name);
 
-  if (new_hardlink_status == -1) {
+  if (new_hardlink_status < 0) {
     printf("Error: Unable to create new hardlink\n");
     return -1;
   }
 
-  if (unlink(old_file_name) == -1) {
+  if (unlink(old_file_name) < 0) {
     printf("Error: Unable to unlink old filename\n"); 
     return -1;
   }
