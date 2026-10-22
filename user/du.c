@@ -28,7 +28,7 @@ int collect_total_size(int first){
 
     if (file_meta.type != T_DIR) {
         if (first) {
-          printf("%ld\t%s\n", total_size, path);
+          printf("%d\t%s\n", total_size, path);
         }
         close(fd);
         return total_size;
@@ -62,7 +62,7 @@ int collect_total_size(int first){
             }
 
             strcpy(path + pos, name); 
-            long int child_size = collect_total_size(0);
+            int child_size = collect_total_size(0);
 
             path[start] = '\0';
             if (child_size < 0) {
@@ -76,7 +76,7 @@ int collect_total_size(int first){
         
     }
 
-    printf("%ld\t%s\n", total_size, path);
+    printf("%d\t%s\n", total_size, path);
 
     close(fd);
     return total_size;
