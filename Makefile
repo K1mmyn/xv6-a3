@@ -151,8 +151,9 @@ UPROGS=\
 	$U/_uoa_testschd\
 	$U/_mv\
 	$U/_mvtest\
-
-
+	$U/_timetest\
+	$U/_du\
+	$U/_dutest\
 
 fs.img: mkfs/mkfs README.xv6 $(UPROGS)
 	mkfs/mkfs fs.img README.xv6 $(UPROGS)

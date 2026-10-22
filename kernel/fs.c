@@ -25,6 +25,18 @@
 // there should be one superblock per disk device, but we run with
 // only one device
 struct superblock sb; 
+extern uint ticks;
+extern struct spinlock tickslock;
+
+uint
+get_kernel_uptime(void)
+{
+  uint t;
+  acquire(&tickslock);
+  t = ticks;
+  release(&tickslock);
+  return t;
+}
 
 // Read the super block.
 static void
@@ -209,6 +221,7 @@ ialloc(uint dev, short type)
     if(dip->type == 0){  // a free inode
       memset(dip, 0, sizeof(*dip));
       dip->type = type;
+      dip->timestamp = get_kernel_uptime();
       log_write(bp);   // mark it allocated on the disk
       brelse(bp);
       return iget(dev, inum);
@@ -236,6 +249,8 @@ iupdate(struct inode *ip)
   dip->minor = ip->minor;
   dip->nlink = ip->nlink;
   dip->size = ip->size;
+  dip->timestamp = ip->timestamp;
+            
   memmove(dip->addrs, ip->addrs, sizeof(ip->addrs));
   log_write(bp);
   brelse(bp);
@@ -310,6 +325,7 @@ ilock(struct inode *ip)
     ip->nlink = dip->nlink;
     ip->size = dip->size;
     memmove(ip->addrs, dip->addrs, sizeof(ip->addrs));
+    ip->timestamp = dip->timestamp;
     brelse(bp);
     ip->valid = 1;
     if(ip->type == 0)
@@ -472,6 +488,7 @@ itrunc(struct inode *ip)
   }
 
   ip->size = 0;
+  ip->timestamp = get_kernel_uptime();
   iupdate(ip);
 }
 
@@ -480,11 +497,12 @@ itrunc(struct inode *ip)
 void
 stati(struct inode *ip, struct stat *st)
 {
-  st->dev = ip->dev;
-  st->ino = ip->inum;
-  st->type = ip->type;
-  st->nlink = ip->nlink;
-  st->size = ip->size;
+  st->dev       = ip->dev;
+  st->ino       = ip->inum;
+  st->type      = ip->type;
+  st->nlink     = ip->nlink;
+  st->size      = ip->size;
+  st->timestamp = ip->timestamp;
 }
 
 // Read data from inode.
@@ -552,7 +570,7 @@ writei(struct inode *ip, int user_src, uint64 src, uint off, uint n)
 
   if(off > ip->size)
     ip->size = off;
-
+  ip->timestamp = get_kernel_uptime();
   // write the i-node back to disk even if the size didn't change
   // because the loop above might have called bmap() and added a new
   // block to ip->addrs[].
